@@ -106,11 +106,21 @@ async def run():
     print(f"av.by check at {datetime.now().strftime('%H:%M')}")
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-blink-features=AutomationControlled"]
-        )
+        try:
+            # local Windows — use system Chrome
+            browser = await pw.chromium.launch(
+                channel="chrome",
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox",
+                      "--disable-blink-features=AutomationControlled"]
+            )
+        except Exception:
+            # GitHub Actions / no Chrome — use bundled Playwright chromium
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox",
+                      "--disable-blink-features=AutomationControlled"]
+            )
         ctx = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
