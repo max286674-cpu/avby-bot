@@ -69,11 +69,11 @@ def get_price_label(price_text: str) -> str:
         return "📊 Средняя"
     return ""
 
-def send_tg(text: str, photo_url: str = None):
-    """Send message or photo to Telegram"""
+def send_tg(text: str, photo_url: str = None) -> bool:
+    """Send message or photo to Telegram, returns True on success"""
     if not TG_TOKEN:
         print("No TG_TOKEN, skipping Telegram")
-        return
+        return False
     import requests
     text = text[:1024]
     if photo_url:
@@ -86,18 +86,23 @@ def send_tg(text: str, photo_url: str = None):
                     files={"photo": ("img.jpg", r.content, "image/jpeg")},
                     timeout=20,
                 )
-                if r2.ok: return
+                if r2.ok:
+                    return True
         except:
             pass
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
             json={"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML",
                    "disable_web_page_preview": True},
             timeout=10,
         )
-    except:
-        pass
+        if r.ok:
+            return True
+        print(f"  TG sendMessage error: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"  TG sendMessage exception: {e}")
+    return False
 
 # ─── Scraper ─────────────────────────────────────────────────────────────
 async def run():
@@ -245,12 +250,13 @@ async def run():
             f"🔗 <a href='{ad['link']}'>Open av.by</a>"
         )
 
-        send_tg(text, ad.get("photo"))
-
-        cur.execute("INSERT INTO seen VALUES (?, ?)", (ad["id"], datetime.now().isoformat()))
-        conn.commit()
-        sent += 1
-        print(f"  [{sent}] {ad['title'][:40]}")
+        if send_tg(text, ad.get("photo")):
+            cur.execute("INSERT INTO seen VALUES (?, ?)", (ad["id"], datetime.now().isoformat()))
+            conn.commit()
+            sent += 1
+            print(f"  [{sent}] {ad['title'][:40]}")
+        else:
+            print(f"  [SKIP] {ad['title'][:40]} — not sent")
         time.sleep(0.6)
 
     conn.close()
