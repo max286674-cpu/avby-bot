@@ -11,8 +11,8 @@ from pathlib import Path
 # ─── Config ──────────────────────────────────────────────────────────────
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT", "5795308229")
-MAX_BYN = 13000       # max price in BYN
-PAGES = 3             # first 3 pages is enough for fresh deals
+MAX_BYN = 35000       # max price in BYN
+PAGES = 5             # first 3 pages is enough for fresh deals
 DB_FILE = Path("avby_seen.db")
 STATE_FILE = Path("avby_state.json")
 
@@ -155,7 +155,7 @@ async def run():
                     date_el = await item.query_selector(".listing-item__date")
                     ds = (await date_el.inner_text()).strip() if date_el else ""
                     hr = parse_age(ds)
-                    if hr > 6: continue
+                    if hr > 12: continue
                     if is_junk(title, params): continue
 
                     link_el = await item.query_selector(".listing-item__link")
