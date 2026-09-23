@@ -235,8 +235,43 @@ async def run():
         if cur.fetchone():
             continue  # already seen
 
+        # --- Deal scoring filter ---
+        pl = ad.get("price_label", "")
+        price = ad.get("price_byn", 0)
+        year = ad.get("year", 0)
+
+        is_below = "ниже" in pl
+        is_well_below = "сильно ниже" in pl
+        is_above = ("выше" in pl or "средняя" in pl) and not is_below
+
+        if is_above:
+            print(f"  [SKIP] {ad['title'][:40]} — выше рынка")
+            continue
+
+        score = 30
+        if is_well_below: score += 30
+        elif is_below: score += 20
+        if price < 5000: score += 15
+        elif price < 10000: score += 10
+        elif price < 15000: score += 5
+        if year >= 2020: score += 15
+        elif year >= 2015: score += 10
+        elif year >= 2010: score += 5
+
+        if score < 40 and not is_below:
+            print(f"  [SKIP] {ad['title'][:40]} — score {score}/100, не выгодно")
+            continue
+        # --- End filter ---
+
         # Build message
-        emoji = "🔥" if "сильно ниже" in ad.get("price_label", "") else "📉" if "ниже" in ad.get("price_label", "") else "⚡"
+        if is_well_below:
+            emoji = "🔥"
+        elif is_below:
+            emoji = "📉"
+        elif score >= 50:
+            emoji = "✅"
+        else:
+            emoji = "⚡"
         label = ad.get("price_label", "")
         loc = ad.get("location", "")
         p = ad.get("params", "")[:55]
