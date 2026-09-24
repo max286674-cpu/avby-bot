@@ -8,7 +8,7 @@ import os, re, time, sqlite3
 from datetime import datetime
 from pathlib import Path
 
-import requests as req
+from curl_cffi import requests as req
 from bs4 import BeautifulSoup
 
 # ─── Config ──────────────────────────────────────────────────────────────
@@ -131,8 +131,8 @@ def run():
         print(f"Page {pg}...")
         try:
             resp = session.get(
-                f"https://cars.av.by/filter?page={pg}", timeout=25
-            )
+                            f"https://cars.av.by/filter?page={pg}", timeout=25, impersonate="chrome129"
+                        )
             if resp.status_code != 200:
                 print(f"  HTTP {resp.status_code}")
                 continue
