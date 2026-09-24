@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """av.by Car Monitor — GitHub Actions edition.
-Uses Playwright (Chromium) to scrape av.by, uses av.by's built-in
-price labels (below market / above market / significantly below).
+Uses Playwright (Chromium) to scrape cars.av.by.
 Sends fresh deals to Telegram.
 """
+
 import os, json, re, time, sqlite3, asyncio, sys
 from datetime import datetime
 from pathlib import Path
@@ -12,23 +12,21 @@ from pathlib import Path
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT", "5795308229")
 MAX_BYN = 35000       # max price in BYN
-PAGES = 5             # first 3 pages is enough for fresh deals
+PAGES = 5             # first 5 pages
 DB_FILE = Path("avby_seen.db")
-STATE_FILE = Path("avby_state.json")
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 def to_byn(t: str) -> float:
-    """Parse '12 500 ₽' or '25 000 $' → numeric value"""
+    """Parse '12 500 ₽' or '25 000 руб.' → numeric value in BYN"""
     try:
         t = t.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
-        # Identify currency
         if "$" in t or "USD" in t:
             v = float(re.sub(r"[^\d.]", "", t.replace("$", "").replace("USD", "")))
-            return round(v * 2.58)  # approximate USD→BYN
+            return round(v * 2.58)
         elif "€" in t or "EUR" in t:
             v = float(re.sub(r"[^\d.]", "", t.replace("€", "").replace("EUR", "")))
             return round(v * 2.95)
-        elif "₽" in t:
+        elif "₽" in t or "руб" in t.lower():
             return float(re.sub(r"[^\d.]", "", t))
         else:
             return float(re.sub(r"[^\d.]", "", t))
@@ -36,7 +34,7 @@ def to_byn(t: str) -> float:
         return 0
 
 def parse_age(text: str) -> float:
-    """'5 минут назад' → hours, '2 часа' → 2, 'день' → 24, 'вчера' → 24"""
+    """'5 минут назад' → hours, '2 часа' → 2, 'день' → 24"""
     t = text.lower().strip()
     m = re.search(r"(\d+)\s*минут", t)
     if m: return int(m.group(1)) / 60
@@ -55,19 +53,6 @@ def is_junk(title: str, params: str) -> bool:
                "мотоцикл", "мопед", "скутер", "квадроцикл"]:
         if kw in txt: return True
     return False
-
-def get_price_label(price_text: str) -> str:
-    """Extract av.by's built-in price label from the listing"""
-    t = price_text.lower().strip()
-    if "сильно ниже рынка" in t:
-        return "🔥 Сильно ниже рынка"
-    elif "ниже рынка" in t:
-        return "📉 Ниже рынка"
-    elif "выше рынка" in t:
-        return "📈 Выше рынка"
-    elif "средняя" in t:
-        return "📊 Средняя"
-    return ""
 
 def send_tg(text: str, photo_url: str = None) -> bool:
     """Send message or photo to Telegram, returns True on success"""
@@ -112,7 +97,6 @@ async def run():
 
     async with async_playwright() as pw:
         try:
-            # local Windows — use system Chrome
             browser = await pw.chromium.launch(
                 channel="chrome",
                 headless=True,
@@ -120,7 +104,6 @@ async def run():
                       "--disable-blink-features=AutomationControlled"]
             )
         except Exception:
-            # GitHub Actions / no Chrome — use bundled Playwright chromium
             browser = await pw.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-setuid-sandbox",
@@ -166,17 +149,12 @@ async def run():
                             link = "https://cars.av.by" + link
                     ad_id = link.split("/")[-1] if "/" in link else ""
 
-                    price_el = await item.query_selector(".listing-item__price")
+                    price_el = await item.query_selector(".listing-item__price-primary")
                     price_text = (await price_el.inner_text()).strip() if price_el else ""
                     price_byn = to_byn(price_text)
-                    if price_byn > MAX_BYN: continue
-
-                    # Get av.by's own market price label
-                    label_el = await item.query_selector(".listing-item__price-remark, .listing-item__price-label, [class*=price-remark], [class*=price-label]")
-                    label = ""
-                    if label_el:
-                        label = (await label_el.inner_text()).strip()
-                    price_label = get_price_label(label or price_text)
+                    if price_byn > MAX_BYN:
+                        print(f"  [SKIP] {title[:40]} — {price_byn} BYN > MAX")
+                        continue
 
                     yr_m = re.search(r"(\d{4})\s*г", params)
                     yr = int(yr_m.group(1)) if yr_m else 0
@@ -185,36 +163,23 @@ async def run():
                     loc_el = await item.query_selector(".listing-item__location")
                     location = (await loc_el.inner_text()).strip() if loc_el else ""
 
-                    # Get photo from detail page (only for good deals)
+                    # Get thumbnail photo from listing card
                     photo = None
-                    if price_label and ("ниже" in price_label):
-                        try:
-                            await page.goto(link, wait_until="domcontentloaded", timeout=15000)
-                            await page.wait_for_timeout(500)
-                            gal = await page.query_selector(".card__gallery")
-                            if gal:
-                                imgs = await gal.query_selector_all("img")
-                                for img in imgs:
-                                    src = (await img.get_attribute("src")) or ""
-                                    ds = (await img.get_attribute("data-src")) or ""
-                                    u = ds or src
-                                    if "avcdn" in u:
-                                        photo = u.replace("/advertbig/", "/advertmedium/").replace(".avif", ".jpg")
-                                        break
-                            # Go back to filter page
-                            await page.go_back()
-                            await page.wait_for_timeout(500)
-                        except:
-                            pass
+                    img_el = await item.query_selector(".listing-item__photo img")
+                    if img_el:
+                        src = (await img_el.get_attribute("data-src")) or (await img_el.get_attribute("src")) or ""
+                        if "avcdn" in src:
+                            photo = src.replace("/advertpreview/", "/advertmedium/").replace("/advertbig/", "/advertmedium/")
 
                     fresh.append({
                         "id": ad_id, "title": title, "link": link,
                         "price_text": price_text, "price_byn": price_byn,
                         "params": params, "year": yr, "location": location,
-                        "ago": ds, "hours": hr,
-                        "price_label": price_label, "photo": photo,
+                        "ago": ds, "hours": hr, "photo": photo,
                     })
-                except:
+                    print(f"  [{len(fresh)}] {title[:40]} — {price_text} — {ds}")
+                except Exception as e:
+                    print(f"  [ERR] {e}")
                     continue
 
             await asyncio.sleep(0.5)
@@ -225,7 +190,6 @@ async def run():
     conn = sqlite3.connect(str(DB_FILE))
     cur = conn.cursor()
     cur.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, sent_at TEXT)")
-    # Clean old entries (>7 days)
     cur.execute("DELETE FROM seen WHERE sent_at < datetime('now', '-7 days')")
     conn.commit()
 
@@ -233,53 +197,41 @@ async def run():
     for ad in fresh:
         cur.execute("SELECT 1 FROM seen WHERE id=?", (ad["id"],))
         if cur.fetchone():
-            continue  # already seen
+            continue
 
-        # --- Deal scoring filter ---
-        pl = ad.get("price_label", "")
+        # --- Deal scoring based on price and year ---
         price = ad.get("price_byn", 0)
         year = ad.get("year", 0)
 
-        is_below = "ниже" in pl
-        is_well_below = "сильно ниже" in pl
-        is_above = ("выше" in pl or "средняя" in pl) and not is_below
-
-        if is_above:
-            print(f"  [SKIP] {ad['title'][:40]} — выше рынка")
-            continue
-
         score = 30
-        if is_well_below: score += 30
-        elif is_below: score += 20
-        if price < 5000: score += 15
-        elif price < 10000: score += 10
-        elif price < 15000: score += 5
-        if year >= 2020: score += 15
-        elif year >= 2015: score += 10
-        elif year >= 2010: score += 5
+        if price < 5000: score += 20
+        elif price < 10000: score += 15
+        elif price < 15000: score += 10
+        elif price < 20000: score += 5
 
-        if score < 40 and not is_below:
-            print(f"  [SKIP] {ad['title'][:40]} — score {score}/100, не выгодно")
+        if year >= 2020: score += 20
+        elif year >= 2015: score += 15
+        elif year >= 2010: score += 10
+        elif year >= 2005: score += 5
+
+        if score < 30:
+            print(f"  [SKIP] {ad['title'][:40]} — score {score}/100")
             continue
-        # --- End filter ---
 
         # Build message
-        if is_well_below:
+        if score >= 60:
             emoji = "🔥"
-        elif is_below:
-            emoji = "📉"
-        elif score >= 50:
+        elif score >= 45:
             emoji = "✅"
         else:
             emoji = "⚡"
-        label = ad.get("price_label", "")
         loc = ad.get("location", "")
-        p = ad.get("params", "")[:55]
+        p = ad.get("params", "")[:60]
         age = ad.get("ago", "")
 
         text = (
             f"{emoji} <b>{ad['title']}</b>\n"
-            f"💰 {ad['price_text']} ({label})\n"
+            f"💰 {ad['price_text']}\n"
             f"📅 {ad['year']} | {p}\n"
             f"⏱ {age} | 📍 {loc}\n"
             f"🔗 <a href='{ad['link']}'>Open av.by</a>"
@@ -289,9 +241,9 @@ async def run():
             cur.execute("INSERT INTO seen VALUES (?, ?)", (ad["id"], datetime.now().isoformat()))
             conn.commit()
             sent += 1
-            print(f"  [{sent}] {ad['title'][:40]}")
+            print(f"  [{sent}] SENT {ad['title'][:40]}")
         else:
-            print(f"  [SKIP] {ad['title'][:40]} — not sent")
+            print(f"  [SKIP] {ad['title'][:40]} — TG send failed")
         time.sleep(0.6)
 
     conn.close()

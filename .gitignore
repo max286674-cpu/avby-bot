@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Database — tracked via GitHub Actions cache, not git
+avby_seen.db

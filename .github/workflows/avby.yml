@@ -28,6 +28,13 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install chromium
 
+      - name: Restore seen DB cache
+        id: cache-db
+        uses: actions/cache@v4
+        with:
+          path: avby_seen.db
+          key: avby-seen-db
+
       - name: Run av.by bot
         run: python avby_bot.py
         env:
