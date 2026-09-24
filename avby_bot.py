@@ -1,71 +1,85 @@
 #!/usr/bin/env python3
 """av.by Car Monitor — GitHub Actions edition.
-Uses Playwright (Chromium) to scrape cars.av.by.
+Uses requests + BeautifulSoup to scrape cars.av.by.
 Sends fresh deals to Telegram.
 """
 
-import os, json, re, time, sqlite3, asyncio, sys
+import os, re, time, sqlite3
 from datetime import datetime
 from pathlib import Path
+
+import requests as req
+from bs4 import BeautifulSoup
 
 # ─── Config ──────────────────────────────────────────────────────────────
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT", "5795308229")
-MAX_BYN = 35000       # max price in BYN
-PAGES = 5             # first 5 pages
+MAX_BYN = 35000
+PAGES = 5
 DB_FILE = Path("avby_seen.db")
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,*/*;q=0.9",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+    "Referer": "https://cars.av.by/filter",
+}
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 def to_byn(t: str) -> float:
-    """Parse '12 500 ₽' or '25 000 руб.' → numeric value in BYN"""
-    try:
-        t = t.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
-        if "$" in t or "USD" in t:
-            v = float(re.sub(r"[^\d.]", "", t.replace("$", "").replace("USD", "")))
-            return round(v * 2.58)
-        elif "€" in t or "EUR" in t:
-            v = float(re.sub(r"[^\d.]", "", t.replace("€", "").replace("EUR", "")))
-            return round(v * 2.95)
-        elif "₽" in t or "руб" in t.lower():
-            return float(re.sub(r"[^\d.]", "", t))
-        else:
-            return float(re.sub(r"[^\d.]", "", t))
-    except:
-        return 0
+    t = t.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
+    if not t:
+        return 0.0
+    v = float(re.sub(r"[^\d.]", "", t))
+    if "$" in t:
+        return v * 2.58
+    if "€" in t:
+        return v * 2.95
+    return v
+
 
 def parse_age(text: str) -> float:
-    """'5 минут назад' → hours, '2 часа' → 2, 'день' → 24"""
     t = text.lower().strip()
+    if not t:
+        return 999
     m = re.search(r"(\d+)\s*минут", t)
-    if m: return int(m.group(1)) / 60
+    if m:
+        return int(m.group(1)) / 60
     m = re.search(r"(\d+)\s*час", t)
-    if m: return int(m.group(1))
+    if m:
+        return int(m.group(1))
     m = re.search(r"(\d+)\s*дн", t)
-    if m: return int(m.group(1)) * 24
-    if "вчера" in t: return 24
-    if "только что" in t: return 0
+    if m:
+        return int(m.group(1)) * 24
+    if "вчера" in t:
+        return 24
+    if "только что" in t:
+        return 0
     return 999
+
 
 def is_junk(title: str, params: str) -> bool:
     txt = (title + " " + params).lower()
-    for kw in ["запчаст", "бит", "авари", "не на ходу", "поврежден", "тотал",
-               "разбит", "на запчасти", "ремонт", "неисправн", "разбор",
-               "мотоцикл", "мопед", "скутер", "квадроцикл"]:
-        if kw in txt: return True
+    for kw in [
+        "запчаст", "бит", "авари", "не на ходу", "поврежден", "тотал",
+        "разбит", "на запчасти", "ремонт", "неисправн", "разбор",
+        "мотоцикл", "мопед", "скутер", "квадроцикл",
+    ]:
+        if kw in txt:
+            return True
     return False
 
+
 def send_tg(text: str, photo_url: str = None) -> bool:
-    """Send message or photo to Telegram, returns True on success"""
     if not TG_TOKEN:
-        print("No TG_TOKEN, skipping Telegram")
+        print("  [TG] No TG_TOKEN")
         return False
-    import requests
     text = text[:1024]
     if photo_url:
         try:
-            r = requests.get(photo_url, timeout=15)
+            r = req.get(photo_url, timeout=15)
             if r.status_code == 200 and len(r.content) > 1000:
-                r2 = requests.post(
+                r2 = req.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
                     data={"chat_id": TG_CHAT, "caption": text, "parse_mode": "HTML"},
                     files={"photo": ("img.jpg", r.content, "image/jpeg")},
@@ -73,245 +87,209 @@ def send_tg(text: str, photo_url: str = None) -> bool:
                 )
                 if r2.ok:
                     return True
-        except:
+        except Exception:
             pass
     try:
-        r = requests.post(
+        r = req.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML",
-                   "disable_web_page_preview": True},
+            json={
+                "chat_id": TG_CHAT,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
             timeout=10,
         )
         if r.ok:
             return True
-        print(f"  TG sendMessage error: {r.status_code} {r.text[:200]}")
+        print(f"  [TG] {r.status_code}: {r.text[:100]}")
     except Exception as e:
-        print(f"  TG sendMessage exception: {e}")
+        print(f"  [TG] {e}")
     return False
 
-# ─── Scraper ─────────────────────────────────────────────────────────────
-async def run():
-    from playwright.async_api import async_playwright
 
+def extract_photo(soup_item) -> str | None:
+    img = soup_item.select_one("img")
+    if not img:
+        return None
+    src = img.get("data-src") or img.get("src") or ""
+    if "avcdn" in src:
+        return src.replace("/advertpreview/", "/advertmedium/")
+    return None
+
+
+# ─── Main ────────────────────────────────────────────────────────────────
+def run():
     print(f"av.by check at {datetime.now().strftime('%H:%M')}")
 
-    async with async_playwright() as pw:
-        # Launch without channel (avoids extra dependency)
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-background-networking",
-                "--disable-background-timer-throttling",
-                "--disable-breakpad",
-                "--disable-client-side-phishing-detection",
-                "--disable-component-update",
-                "--disable-default-apps",
-                "--disable-dev-shm-usage",
-                "--disable-features=TranslateUI,BlinkGenPropertyTrees",
-                "--disable-hang-monitor",
-                "--disable-ipc-flooding-protection",
-                "--disable-popup-blocking",
-                "--disable-prompt-on-repost",
-                "--disable-renderer-backgrounding",
-                "--disable-sync",
-                "--enable-features=NetworkService,NetworkServiceInProcess",
-                "--force-color-profile=srgb",
-                "--hide-scrollbars",
-                "--metrics-recording-only",
-                "--mute-audio",
-                "--no-first-run",
-                "--password-store=basic",
-                "--use-gl=swiftshader",
-                "--use-mock-keychain",
-            ]
-        )
+    session = req.Session()
+    session.headers.update(HEADERS)
 
-        ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="ru-RU",
-            timezone_id="Europe/Minsk",
-            geolocation={"latitude": 53.9, "longitude": 27.5667},
-            permissions=["geolocation"],
-            extra_http_headers={
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            }
-        )
+    fresh = []
 
-        # Stealth: hide automation flags
-        await ctx.add_init_script("""
-            // Override navigator.webdriver
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
-            // Override chrome.runtime
-            window.chrome = { runtime: {} };
-            // Override permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (params) => (
-                params.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(params)
-            );
-            // Override plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['ru-RU', 'ru', 'en-US', 'en'],
-            });
-        """)
-
-        page = await ctx.new_page()
-
-        fresh = []
-        for pg in range(1, PAGES + 1):
-            print(f"  Page {pg}...")
-            resp = await page.goto(f"https://cars.av.by/filter?page={pg}",
-                                   wait_until="domcontentloaded", timeout=30000)
-            status = resp.status if resp else "?"
-            print(f"  [PAGE {pg}] HTTP status {status}")
-
-            await page.wait_for_timeout(3000)
-
-            items = await page.query_selector_all(".listing-item")
-            if not items:
-                title = await page.title()
-                body_snippet = (await page.inner_text("body"))[:600]
-                print(f"  [PAGE {pg}] title: {title}")
-                print(f"  [PAGE {pg}] body starts: {body_snippet[:400]}")
-                print(f"  [PAGE {pg}] still empty, skipping")
+    for pg in range(1, PAGES + 1):
+        print(f"Page {pg}...")
+        try:
+            resp = session.get(
+                f"https://cars.av.by/filter?page={pg}", timeout=25
+            )
+            if resp.status_code != 200:
+                print(f"  HTTP {resp.status_code}")
                 continue
+        except Exception as e:
+            print(f"  request: {e}")
+            continue
 
-            print(f"  [PAGE {pg}] {len(items)} items")
+        soup = BeautifulSoup(resp.text, "lxml")
+        items = soup.select(".listing-item")
+        if not items:
+            print(f"  no listings (page {pg})")
+            continue
 
-            for item in items:
-                try:
-                    title_el = await item.query_selector(".listing-item__title")
-                    if not title_el:
-                        continue
-                    title = (await title_el.inner_text()).strip()
+        for it in items:
+            try:
+                link_el = it.select_one(".listing-item__link")
+                if not link_el:
+                    continue
+                href = link_el.get("href", "")
+                ad_id = href.split("/")[-1] if "/" in href else ""
+                link = (
+                    f"https://cars.av.by{href}"
+                    if href.startswith("/")
+                    else href
+                )
 
-                    params_el = await item.query_selector(".listing-item__params")
-                    params = (await params_el.inner_text()).strip() if params_el else ""
+                title = link_el.get_text(strip=True)
 
-                    date_el = await item.query_selector(".listing-item__date")
-                    ds = (await date_el.inner_text()).strip() if date_el else ""
-                    hr = parse_age(ds)
-                    if hr > 12:
-                        print(f"  [SKIP] {title[:40]} — old {ds}")
-                        continue
-                    if is_junk(title, params):
-                        print(f"  [SKIP] {title[:40]} — junk")
-                        continue
-
-                    link_el = await item.query_selector(".listing-item__link")
-                    link = ""
-                    if link_el:
-                        link = (await link_el.get_attribute("href")) or ""
-                        if link and not link.startswith("http"):
-                            link = "https://cars.av.by" + link
-                    ad_id = link.split("/")[-1] if "/" in link else ""
-
-                    price_el = await item.query_selector(".listing-item__price-primary")
-                    price_text = (await price_el.inner_text()).strip() if price_el else ""
-                    price_byn = to_byn(price_text)
-                    if price_byn > MAX_BYN:
-                        print(f"  [SKIP] {title[:40]} — {price_byn} BYN > MAX")
-                        continue
-
-                    yr_m = re.search(r"(\d{4})\s*г", params)
-                    yr = int(yr_m.group(1)) if yr_m else 0
-                    if yr > 0 and yr < 1995: continue
-
-                    loc_el = await item.query_selector(".listing-item__location")
-                    location = (await loc_el.inner_text()).strip() if loc_el else ""
-
-                    # Get thumbnail photo from listing card
-                    photo = None
-                    img_el = await item.query_selector(".listing-item__photo img")
-                    if img_el:
-                        src = (await img_el.get_attribute("data-src")) or (await img_el.get_attribute("src")) or ""
-                        if "avcdn" in src:
-                            photo = src.replace("/advertpreview/", "/advertmedium/").replace("/advertbig/", "/advertmedium/")
-
-                    fresh.append({
-                        "id": ad_id, "title": title, "link": link,
-                        "price_text": price_text, "price_byn": price_byn,
-                        "params": params, "year": yr, "location": location,
-                        "ago": ds, "hours": hr, "photo": photo,
-                    })
-                    print(f"  [{len(fresh)}] {title[:40]} — {price_text} — {ds}")
-                except Exception as e:
-                    print(f"  [ERR] item parse: {e}")
+                # Price
+                price_el = it.select_one(".listing-item__price-primary")
+                price_text = price_el.get_text(strip=True) if price_el else ""
+                price_byn = to_byn(price_text)
+                if price_byn > MAX_BYN:
                     continue
 
-            await asyncio.sleep(0.5)
+                # Params
+                params_el = it.select_one(".listing-item__params")
+                params = params_el.get_text(strip=True) if params_el else ""
 
-        await browser.close()
+                # Year
+                yr = 0
+                ym = re.search(r"(\d{4})\s*г", params)
+                if ym:
+                    yr = int(ym.group(1))
+                if yr > 0 and yr < 1995:
+                    continue
 
-    # ─── Dedup & Send ────────────────────────────────────────────────────
+                # Age
+                date_el = it.select_one(".listing-item__date")
+                ds = date_el.get_text(strip=True) if date_el else ""
+                hr = parse_age(ds)
+                if hr > 12:
+                    continue
+
+                # Junk
+                if is_junk(title, params):
+                    continue
+
+                # Location
+                loc_el = it.select_one(".listing-item__location")
+                location = loc_el.get_text(strip=True) if loc_el else ""
+
+                # Photo
+                photo = extract_photo(it)
+
+                fresh.append(
+                    {
+                        "id": ad_id,
+                        "title": title,
+                        "link": link,
+                        "price_text": price_text,
+                        "price_byn": price_byn,
+                        "params": params,
+                        "year": yr,
+                        "location": location,
+                        "ago": ds,
+                        "photo": photo,
+                    }
+                )
+                print(f"  [{len(fresh)}] {title[:40]} — {price_text} — {ds}")
+            except Exception as e:
+                print(f"  [ERR] {e}")
+                continue
+
+        time.sleep(0.3)
+
+    # ─── Dedup ────────────────────────────────────────────────────────────────
     conn = sqlite3.connect(str(DB_FILE))
     cur = conn.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, sent_at TEXT)")
-    cur.execute("DELETE FROM seen WHERE sent_at < datetime('now', '-7 days')")
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, sent_at TEXT)"
+    )
+    cur.execute(
+        "DELETE FROM seen WHERE sent_at < datetime('now', '-7 days')"
+    )
     conn.commit()
 
     sent = 0
     for ad in fresh:
         cur.execute("SELECT 1 FROM seen WHERE id=?", (ad["id"],))
         if cur.fetchone():
-            print(f"  [SKIP] {ad['title'][:40]} — already seen")
+            print(f"  [SKIP] {ad['title'][:40]} — seen")
             continue
 
-        # --- Deal scoring based on price and year ---
+        # ─── Scoring ─────────────────────────────────────────────────────────
         price = ad.get("price_byn", 0)
         year = ad.get("year", 0)
 
         score = 30
-        if price < 5000: score += 20
-        elif price < 10000: score += 15
-        elif price < 15000: score += 10
-        elif price < 20000: score += 5
+        if price < 5000:
+            score += 20
+        elif price < 10000:
+            score += 15
+        elif price < 15000:
+            score += 10
+        elif price < 20000:
+            score += 5
 
-        if year >= 2020: score += 20
-        elif year >= 2015: score += 15
-        elif year >= 2010: score += 10
-        elif year >= 2005: score += 5
+        if year >= 2020:
+            score += 20
+        elif year >= 2015:
+            score += 15
+        elif year >= 2010:
+            score += 10
+        elif year >= 2005:
+            score += 5
 
         if score < 30:
-            print(f"  [SKIP] {ad['title'][:40]} — score {score}/100")
+            print(f"  [SKIP] {ad['title'][:40]} — score {score}")
             continue
 
-        # Build message
+        # ─── Send ─────────────────────────────────────────────────────────────
         if score >= 60:
-            emoji = "🔥"
+            emoji = "\U0001f525"  # 🔥
         elif score >= 45:
-            emoji = "✅"
+            emoji = "\u2705"      # ✅
         else:
-            emoji = "⚡"
-        loc = ad.get("location", "")
-        p = ad.get("params", "")[:60]
-        age = ad.get("ago", "")
+            emoji = "\u26a1"      # ⚡
 
         text = (
             f"{emoji} <b>{ad['title']}</b>\n"
-            f"💰 {ad['price_text']}\n"
-            f"📅 {ad['year']} | {p}\n"
-            f"⏱ {age} | 📍 {loc}\n"
-            f"🔗 <a href='{ad['link']}'>Open av.by</a>"
+            f"\U0001f4b0 {ad['price_text']}\n"
+            f"\U0001f4c5 {ad['year']} | {ad['params'][:60]}\n"
+            f"\u23f1 {ad['ago']} | \U0001f4cd {ad['location']}\n"
+            f"\U0001f517 <a href='{ad['link']}'>Open av.by</a>"
         )
 
         if send_tg(text, ad.get("photo")):
-            cur.execute("INSERT INTO seen VALUES (?, ?)", (ad["id"], datetime.now().isoformat()))
+            cur.execute(
+                "INSERT INTO seen VALUES (?, ?)",
+                (ad["id"], datetime.now().isoformat()),
+            )
             conn.commit()
             sent += 1
             print(f"  [{sent}] SENT {ad['title'][:40]}")
         else:
-            print(f"  [SKIP] {ad['title'][:40]} — TG send failed")
+            print(f"  [SKIP] {ad['title'][:40]} — TG fail")
         time.sleep(0.6)
 
     conn.close()
@@ -319,5 +297,6 @@ async def run():
     if sent == 0:
         print("Nothing new")
 
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    run()
