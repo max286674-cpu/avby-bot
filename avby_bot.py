@@ -96,52 +96,102 @@ async def run():
     print(f"av.by check at {datetime.now().strftime('%H:%M')}")
 
     async with async_playwright() as pw:
-        try:
-            browser = await pw.chromium.launch(
-                channel="chrome",
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox",
-                      "--disable-blink-features=AutomationControlled"]
-            )
-        except Exception:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox",
-                      "--disable-blink-features=AutomationControlled"]
-            )
+        # Launch without channel (avoids extra dependency)
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-background-networking",
+                "--disable-background-timer-throttling",
+                "--disable-breakpad",
+                "--disable-client-side-phishing-detection",
+                "--disable-component-update",
+                "--disable-default-apps",
+                "--disable-dev-shm-usage",
+                "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+                "--disable-hang-monitor",
+                "--disable-ipc-flooding-protection",
+                "--disable-popup-blocking",
+                "--disable-prompt-on-repost",
+                "--disable-renderer-backgrounding",
+                "--disable-sync",
+                "--enable-features=NetworkService,NetworkServiceInProcess",
+                "--force-color-profile=srgb",
+                "--hide-scrollbars",
+                "--metrics-recording-only",
+                "--mute-audio",
+                "--no-first-run",
+                "--password-store=basic",
+                "--use-gl=swiftshader",
+                "--use-mock-keychain",
+            ]
+        )
+
         ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
             locale="ru-RU",
+            timezone_id="Europe/Minsk",
+            geolocation={"latitude": 53.9, "longitude": 27.5667},
+            permissions=["geolocation"],
+            extra_http_headers={
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            }
         )
+
+        # Stealth: hide automation flags
+        await ctx.add_init_script("""
+            // Override navigator.webdriver
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+            // Override chrome.runtime
+            window.chrome = { runtime: {} };
+            // Override permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (params) => (
+                params.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(params)
+            );
+            // Override plugins
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5],
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['ru-RU', 'ru', 'en-US', 'en'],
+            });
+        """)
+
         page = await ctx.new_page()
 
         fresh = []
         for pg in range(1, PAGES + 1):
             print(f"  Page {pg}...")
-            await page.goto(f"https://cars.av.by/filter?page={pg}",
-                           wait_until="domcontentloaded", timeout=25000)
+            resp = await page.goto(f"https://cars.av.by/filter?page={pg}",
+                                   wait_until="domcontentloaded", timeout=30000)
+            status = resp.status if resp else "?"
+            print(f"  [PAGE {pg}] HTTP status {status}")
 
-            # Wait for listings to render (av.by loads async)
-            try:
-                await page.wait_for_selector(".listing-item", timeout=8000)
-                await page.wait_for_timeout(500)
-            except:
-                print(f"  [PAGE {pg}] no .listing-item found")
-                await page.wait_for_timeout(2000)
-                items = await page.query_selector_all(".listing-item")
-                if not items:
-                    print(f"  [PAGE {pg}] still empty, skipping")
-                    continue
+            await page.wait_for_timeout(3000)
 
             items = await page.query_selector_all(".listing-item")
+            if not items:
+                title = await page.title()
+                body_snippet = (await page.inner_text("body"))[:600]
+                print(f"  [PAGE {pg}] title: {title}")
+                print(f"  [PAGE {pg}] body starts: {body_snippet[:400]}")
+                print(f"  [PAGE {pg}] still empty, skipping")
+                continue
+
             print(f"  [PAGE {pg}] {len(items)} items")
 
             for item in items:
                 try:
                     title_el = await item.query_selector(".listing-item__title")
                     if not title_el:
-                        print(f"  [SKIP] no title element")
                         continue
                     title = (await title_el.inner_text()).strip()
 
@@ -168,8 +218,6 @@ async def run():
 
                     price_el = await item.query_selector(".listing-item__price-primary")
                     price_text = (await price_el.inner_text()).strip() if price_el else ""
-                    if not price_el:
-                        print(f"  [WARN] {title[:40]} — NO price element found")
                     price_byn = to_byn(price_text)
                     if price_byn > MAX_BYN:
                         print(f"  [SKIP] {title[:40]} — {price_byn} BYN > MAX")
