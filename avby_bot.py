@@ -118,18 +118,31 @@ async def run():
 
         fresh = []
         for pg in range(1, PAGES + 1):
+            print(f"  Page {pg}...")
             await page.goto(f"https://cars.av.by/filter?page={pg}",
-                           wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(1500)
+                           wait_until="domcontentloaded", timeout=25000)
+
+            # Wait for listings to render (av.by loads async)
+            try:
+                await page.wait_for_selector(".listing-item", timeout=8000)
+                await page.wait_for_timeout(500)
+            except:
+                print(f"  [PAGE {pg}] no .listing-item found")
+                await page.wait_for_timeout(2000)
+                items = await page.query_selector_all(".listing-item")
+                if not items:
+                    print(f"  [PAGE {pg}] still empty, skipping")
+                    continue
 
             items = await page.query_selector_all(".listing-item")
-            if not items:
-                break
+            print(f"  [PAGE {pg}] {len(items)} items")
 
             for item in items:
                 try:
                     title_el = await item.query_selector(".listing-item__title")
-                    if not title_el: continue
+                    if not title_el:
+                        print(f"  [SKIP] no title element")
+                        continue
                     title = (await title_el.inner_text()).strip()
 
                     params_el = await item.query_selector(".listing-item__params")
@@ -138,8 +151,12 @@ async def run():
                     date_el = await item.query_selector(".listing-item__date")
                     ds = (await date_el.inner_text()).strip() if date_el else ""
                     hr = parse_age(ds)
-                    if hr > 12: continue
-                    if is_junk(title, params): continue
+                    if hr > 12:
+                        print(f"  [SKIP] {title[:40]} — old {ds}")
+                        continue
+                    if is_junk(title, params):
+                        print(f"  [SKIP] {title[:40]} — junk")
+                        continue
 
                     link_el = await item.query_selector(".listing-item__link")
                     link = ""
@@ -151,6 +168,8 @@ async def run():
 
                     price_el = await item.query_selector(".listing-item__price-primary")
                     price_text = (await price_el.inner_text()).strip() if price_el else ""
+                    if not price_el:
+                        print(f"  [WARN] {title[:40]} — NO price element found")
                     price_byn = to_byn(price_text)
                     if price_byn > MAX_BYN:
                         print(f"  [SKIP] {title[:40]} — {price_byn} BYN > MAX")
@@ -179,7 +198,7 @@ async def run():
                     })
                     print(f"  [{len(fresh)}] {title[:40]} — {price_text} — {ds}")
                 except Exception as e:
-                    print(f"  [ERR] {e}")
+                    print(f"  [ERR] item parse: {e}")
                     continue
 
             await asyncio.sleep(0.5)
@@ -197,6 +216,7 @@ async def run():
     for ad in fresh:
         cur.execute("SELECT 1 FROM seen WHERE id=?", (ad["id"],))
         if cur.fetchone():
+            print(f"  [SKIP] {ad['title'][:40]} — already seen")
             continue
 
         # --- Deal scoring based on price and year ---
