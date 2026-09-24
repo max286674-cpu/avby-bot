@@ -131,7 +131,7 @@ def run():
         print(f"Page {pg}...")
         try:
             resp = session.get(
-                            f"https://cars.av.by/filter?page={pg}", timeout=25, impersonate="chrome129"
+                            f"https://cars.av.by/filter?page={pg}", timeout=25, impersonate="chrome124"
                         )
             if resp.status_code != 200:
                 print(f"  HTTP {resp.status_code}")
