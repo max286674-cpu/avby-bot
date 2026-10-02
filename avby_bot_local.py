@@ -107,8 +107,17 @@ def is_junk(title: str, params: str) -> bool:
         "разбит", "на запчасти", "ремонт", "неисправн", "разбор",
         "мотоцикл", "мопед", "скутер", "квадроцикл",
     ]:
-        if kw in txt:
-            return True
+        i = txt.find(kw)
+        if i == -1:
+            continue
+        # граница слова слева (не кусок другого слова)
+        if i > 0 and (txt[i - 1].isalpha() or txt[i - 1].isdigit()):
+            continue
+        # отрицание рядом ("не битый", "без ремонта") — не мусор
+        before = txt[max(0, i - 12):i]
+        if before.rstrip().endswith(("не", "без", "не ", "без ")):
+            continue
+        return True
     return False
 
 
@@ -271,7 +280,7 @@ def _match_option(options, needle: str):
         return None
     for oid, label in options:
         lab = _norm(label)
-        if lab.startswith(first) or lab.split("-")[0] == _norm(first):
+        if lab.startswith(first):
             return oid
     return None
 
@@ -631,6 +640,9 @@ def run():
             log(f"  [WAF] page blocked, cooldown")
             COOLDOWN_FILE.write_text(datetime.now().isoformat())
             break
+        except Exception as e:
+            log(f"  [ERR] {ad['title'][:40]} — оценка упала ({e}), повтор later")
+            continue
 
         if est == "skip":
             cur.execute(
@@ -645,12 +657,7 @@ def run():
             continue
 
         avg, slug = est
-        # seen ставим после вердикта
-        cur.execute(
-            "INSERT OR REPLACE INTO seen VALUES (?, ?)",
-            (ad["id"], datetime.now().isoformat()),
-        )
-        conn.commit()
+        # seen для не-дилов ставим после вердикта ниже; для дилов — после успешной отправки
 
         if avg <= 0:
             continue
@@ -660,6 +667,11 @@ def run():
             f"  [EVAL] {ad['title'][:40]} — {ad['price_byn']:.0f} vs av.by {avg:.0f} → {dev*100:+.0f}%"
         )
         if dev > -DEAL_PCT:
+            cur.execute(
+                "INSERT OR REPLACE INTO seen VALUES (?, ?)",
+                (ad["id"], datetime.now().isoformat()),
+            )
+            conn.commit()
             continue
 
         emoji = "🔥" if dev <= -HOT_PCT else "✅"
@@ -675,8 +687,14 @@ def run():
         if send_tg(text, ad.get("photo")):
             sent += 1
             log(f"  [SENT] {ad['title'][:40]}")
+            cur.execute(
+                "INSERT OR REPLACE INTO seen VALUES (?, ?)",
+                (ad["id"], datetime.now().isoformat()),
+            )
+            conn.commit()
         else:
-            log(f"  [SKIP] {ad['title'][:40]} — TG fail")
+            # не помечаем seen — ретрай в следующий тик
+            log(f"  [SKIP] {ad['title'][:40]} — TG fail, повтор later")
         time.sleep(0.6)
 
     conn.close()
