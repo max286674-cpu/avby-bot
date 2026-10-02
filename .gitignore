@@ -1,9 +1,13 @@
-# Python
+.env
+*.db
+*.log
+*.html
 __pycache__/
-*.pyc
-*.pyo
-venv/
-.venv/
-
-# Database — tracked via GitHub Actions cache, not git
-avby_seen.db
+.nul
+nul
+temp_profile/
+*.json
+test_*.py
+analyze_*.py
+avby_bot.db
+.tg_offset
